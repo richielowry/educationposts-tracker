@@ -28,11 +28,7 @@ TARGET_COUNTIES = {"Kilkenny", "Laois"}
 BASE_URL = "https://www.educationposts.ie"
 SEARCH_URL = f"{BASE_URL}/posts/primary_level"
 
-SHEET_COLS = [
-    "ID", "School Name", "Address", "KM to Kilkenny City",
-    "Type of Vacancy", "Status of Post", "County",
-    "Application Deadline", "Applied", "Notes"
-]
+PAGE_SIZE = 50
 
 # ---------------------------------------------------------------------------
 # Google Sheets
@@ -61,9 +57,12 @@ def get_existing_ids(ws):
 
 def haversine_km(lat, lon):
     R = 6371
-    lat1, lon1 = math.radians(KILKENNY_CITY_LAT), math.radians(KILKENNY_CITY_LON)
-    lat2, lon2 = math.radians(lat), math.radians(lon)
-    dlat, dlon = lat2 - lat1, lon2 - lon1
+    lat1 = math.radians(KILKENNY_CITY_LAT)
+    lon1 = math.radians(KILKENNY_CITY_LON)
+    lat2 = math.radians(lat)
+    lon2 = math.radians(lon)
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
     a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     return round(2 * R * math.asin(math.sqrt(a)), 1)
 
@@ -98,14 +97,13 @@ def geocode_school(school_name, county):
             if results:
                 lat = float(results[0]["lat"])
                 lon = float(results[0]["lon"])
-                # Shorten the display_name: keep first 3–4 meaningful parts
                 raw = results[0].get("display_name", "")
                 parts = [p.strip() for p in raw.split(",")]
                 address = ", ".join(parts[:4]) if len(parts) >= 4 else raw
                 return address, lat, lon
         except Exception as e:
             print(f"  Geocode error for '{query}': {e}")
-        time.sleep(1.1)  # Nominatim: max 1 request/second
+        time.sleep(1.1)  # Nominatim rate limit: max 1 request/second
 
     return "", None, None
 
@@ -118,7 +116,8 @@ SCRAPE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; personal job alert script)"
 }
 
-DATE_RE = re.compile(r"\d{2}/\d{2}/\d{4}")
+DATE_RE  = re.compile(r"\d{2}/\d{2}/\d{4}")
+TOTAL_RE = re.compile(r"of\s+([\d,]+)\s*\)", re.IGNORECASE)
 
 
 def clean_deadline(raw):
@@ -127,17 +126,37 @@ def clean_deadline(raw):
     return m.group(0) if m else raw.strip()
 
 
+def parse_max_pages(soup):
+    """
+    Read 'Showing 1 to 50 (of 1626)' to calculate the real number of pages.
+    Returns an int, or 50 as a safe fallback if the text isn't found.
+    """
+    text = soup.get_text(" ")
+    m = TOTAL_RE.search(text)
+    if m:
+        total = int(m.group(1).replace(",", ""))
+        pages = math.ceil(total / PAGE_SIZE)
+        print(f"  Site reports {total} total listings → {pages} pages to fetch")
+        return pages
+    print("  Warning: could not read total listing count; using fallback of 50 pages")
+    return 50
+
+
 def scrape_jobs():
     """
     Scrape all pages of primary_level results, return list of dicts
     for Kilkenny and Laois only.
     """
     jobs = []
+    seen_ids = set()   # deduplicate within this run
+    max_pages = None
     page = 1
 
     while True:
         url = f"{SEARCH_URL}?p={page}&sb=application_closing_date&sd=0"
-        print(f"Fetching page {page}: {url}")
+        label = f"{page}/{max_pages}" if max_pages else str(page)
+        print(f"Fetching page {label}: {url}")
+
         try:
             resp = requests.get(url, headers=SCRAPE_HEADERS, timeout=20)
             resp.raise_for_status()
@@ -146,14 +165,19 @@ def scrape_jobs():
             break
 
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        # First page only: read the total count to know when to stop
+        if page == 1:
+            max_pages = parse_max_pages(soup)
+
         table = soup.find("table")
         if not table:
-            print("  No table found — stopping pagination.")
+            print("  No table found — stopping.")
             break
 
-        rows = table.find_all("tr")[1:]  # skip header row
+        rows = table.find_all("tr")[1:]   # skip header row
         if not rows:
-            print("  Empty table — stopping pagination.")
+            print("  Empty table — stopping.")
             break
 
         found_on_page = 0
@@ -162,14 +186,14 @@ def scrape_jobs():
             if len(cells) < 6:
                 continue
 
-            job_id  = cells[0].get_text(strip=True)
-            school  = cells[1].get_text(strip=True)
-            vacancy = cells[2].get_text(strip=True)
-            status  = cells[3].get_text(strip=True)
-            county  = cells[4].get_text(strip=True)
+            job_id   = cells[0].get_text(strip=True)
+            school   = cells[1].get_text(strip=True)
+            vacancy  = cells[2].get_text(strip=True)
+            status   = cells[3].get_text(strip=True)
+            county   = cells[4].get_text(strip=True)
             deadline = clean_deadline(cells[5].get_text(strip=True))
 
-            if county in TARGET_COUNTIES:
+            if county in TARGET_COUNTIES and job_id not in seen_ids:
                 jobs.append({
                     "id":       job_id,
                     "school":   school,
@@ -181,14 +205,17 @@ def scrape_jobs():
                 })
                 found_on_page += 1
 
-        print(f"  Found {found_on_page} Kilkenny/Laois jobs on page {page}")
+            seen_ids.add(job_id)
 
-        # Stop if there's no "next" page link
-        if not soup.find("a", string="»"):
+        print(f"  Found {found_on_page} new Kilkenny/Laois jobs on page {page}")
+
+        # Stop when we've fetched the last real page
+        if page >= max_pages:
+            print(f"  Reached last page ({max_pages}) — finished.")
             break
 
         page += 1
-        time.sleep(1)
+        time.sleep(1)   # be polite to the server
 
     return jobs
 
@@ -200,33 +227,27 @@ def scrape_jobs():
 def main():
     print("=== EducationPosts scraper starting ===")
 
-    # Connect to sheet
     print("Connecting to Google Sheet...")
     ws = get_worksheet()
     existing_ids = get_existing_ids(ws)
-    print(f"  {len(existing_ids)} existing job IDs in sheet")
+    print(f"  {len(existing_ids)} existing job IDs already in sheet")
 
-    # Scrape
     print("Scraping educationposts.ie...")
     all_jobs = scrape_jobs()
     new_jobs = [j for j in all_jobs if j["id"] not in existing_ids]
-    print(f"Total Kilkenny/Laois jobs found: {len(all_jobs)}, new: {len(new_jobs)}")
+    print(f"Total Kilkenny/Laois jobs found: {len(all_jobs)}, new this run: {len(new_jobs)}")
 
     if not new_jobs:
         print("No new jobs — nothing to append.")
         return
 
-    # Append new rows
     for i, job in enumerate(new_jobs, 1):
         print(f"[{i}/{len(new_jobs)}] {job['school']} ({job['county']}) ...")
 
         address, lat, lon = geocode_school(job["school"], job["county"])
         km = haversine_km(lat, lon) if lat is not None else ""
 
-        if address:
-            print(f"  → {address}  ({km} km)")
-        else:
-            print(f"  → Could not geocode")
+        print(f"  → {address or 'could not geocode'}  {f'({km} km)' if km else ''}")
 
         row = [
             job["id"],
