@@ -1,0 +1,32 @@
+name: EducationPosts Job Scraper
+
+on:
+  # Run every morning at 7:30am Irish time (UTC+1 in summer, so 06:30 UTC)
+  schedule:
+    - cron: '30 6 * * *'
+
+  # Also allow triggering manually from the GitHub Actions tab
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 gspread google-auth
+
+      - name: Run scraper
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+        run: python scraper.py
