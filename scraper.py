@@ -23,7 +23,13 @@ from google.oauth2.service_account import Credentials
 KILKENNY_CITY_LAT = 52.6541
 KILKENNY_CITY_LON = -7.2448
 
-TARGET_COUNTIES = {"Kilkenny", "Laois"}
+TARGET_COUNTIES = {"Kilkenny", "Laois", "Carlow"}
+
+EXCLUDE_VACANCIES = {
+    "Special Needs Assistant",
+    "Principal Teacher",
+    "School Transport Bus Escort",
+}
 
 BASE_URL = "https://www.educationposts.ie"
 SEARCH_URL = f"{BASE_URL}/posts/primary_level"
@@ -193,7 +199,7 @@ def scrape_jobs():
             county   = cells[4].get_text(strip=True)
             deadline = clean_deadline(cells[5].get_text(strip=True))
 
-            if county in TARGET_COUNTIES and job_id not in seen_ids:
+            if county in TARGET_COUNTIES and vacancy not in EXCLUDE_VACANCIES and job_id not in seen_ids:
                 jobs.append({
                     "id":       job_id,
                     "school":   school,
